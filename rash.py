@@ -8,9 +8,9 @@ Options:
     --p=2             Minkowski p
     --eps=0.35        margin multiplier
     --budget=30       label budget
-    --min=4           min rows per bin
+    --bins=6          bins per dim
     --few=32          pole sample size
-    --dims=8          max dims
+    --dims=6          max dims
     --file=auto93.csv   input csv
 """
 from __future__ import annotations
@@ -181,40 +181,22 @@ def poles(d: Data, rs: Rows, prev: list[Dim]) -> tuple[Row, Row, float]:
                  key=lambda z: z[0])
   return e, w, g2 ** .5
 
-def binsOf(ps: list[float], ys: list[float], eps: float, nmin: int,
-           parentVar: float) -> list[float]:
-  """Greedy cuts where global-var - pooled >= eps, both sides >= nmin."""
-  order = sorted(zip(ps, ys))
-  L, R  = Num(), adds(y for _, y in order)
-  cuts, lo, n = [], 0, len(order)
-  for k, (p, y) in enumerate(order, 1):
-    add(L, sub(R, y))
-    if k-lo < nmin or n-k < nmin: continue
-    pooled = (L.n*L.sd**2 + R.n*R.sd**2) / (n-lo)
-    if parentVar - pooled >= eps:
-      cuts.append(p); lo, L = k, Num()
-  return cuts
-
-def newDim(d: Data, rs: Rows, ys: list[float], epsy: float,
-           parentVar: float, prev: list[Dim]) -> Dim | None:
-  """Build next Dim; None if no valid cut."""
+def newDim(d: Data, rs: Rows, epsx: float, prev: list[Dim]) -> Dim | None:
+  """Build next Dim with equal-width bins; None if gap < epsx."""
   e, w, gap = poles(d, rs, prev)
-  if gap < 1e-9: return None
-  dim = Dim(e, w, gap)
-  ps  = [proj(dim, d, r) for r in rs]
-  if cuts := binsOf(ps, ys, epsy, the.min, parentVar):
-    dim.cuts = cuts
-    return dim
-  return None
+  if gap < epsx: return None
+  step = gap / the.bins
+  cuts = [step * (i + 1) for i in range(int(the.bins) - 1)]
+  return Dim(e, w, gap, cuts)
 
 def dims(d: Data, rs: Rows) -> list[Dim]:
   """Grow Dims; stop on first no-split or cap."""
-  ys        = [disty(d, r) for r in rs]
-  parentVar = adds(ys).sd**2
-  epsy      = parentVar * the.eps
+  t    = sample(rs, min(the.few, len(rs)))
+  xSd  = adds(distx(d, a, b) for a in t for b in t if a is not b).sd
+  epsx = the.eps * xSd
   out: list[Dim] = []
   while len(out) < the.dims:
-    dim = newDim(d, rs, ys, epsy, parentVar, out)
+    dim = newDim(d, rs, epsx, out)
     if dim is None: break
     out.append(dim)
   return out
@@ -251,6 +233,20 @@ def test__dim():
   cs  = clusters(lab, lab.rows, ds)
   print("dims", len(ds), "clusters", len(cs),
         "bins", [len(x.cuts) + 1 for x in ds])
+
+def test__4d():
+  """7D data, only 4 dims have spread. Should find ~4 dims, not 7."""
+  import os
+  path = "etc/spread4of7.csv"
+  if not os.path.exists(path):
+    print("skip: run `python3 etc/spread4of7.py > etc/spread4of7.csv` first"); return
+  d   = Data(csv(path))
+  lab = labelled(d)
+  ds  = dims(lab, lab.rows)
+  cs  = clusters(lab, lab.rows, ds)
+  print("4d test: dims", len(ds), "clusters", len(cs),
+        "bins", [len(x.cuts) + 1 for x in ds])
+  assert len(ds) <= 5, f"expected ~4 dims, got {len(ds)}"
 
 def test__simplex():
   """Noisy 5-simplex: 6 vertices x 20 rows. Rank-5; expect ~5 dims."""
