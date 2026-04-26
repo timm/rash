@@ -46,9 +46,10 @@ sh: ## launch dev shell (banner + etc/bash.rc)
 ~/tmp/%.pdf: %.py $(MAKEFILE_LIST) ## .py ==> .pdf
 	@mkdir -p ~/tmp
 	@echo "pdf-ing $@ ... "
-	@a2ps -Br --quiet --landscape --chars-per-line=90 \
-	      --line-numbers=1 --borders=no --pro=color --columns=3 \
-	      -M letter -o - $< | ps2pdf - $@
+	@a2ps -Br --quiet --landscape --chars-per-line=65 \
+	      --lines-per-page=100 --line-numbers=1 --borders=no \
+	      --pro=color --columns=3 -M letter \
+	      -o - $< | ps2pdf - $@
 	@open $@
 
 eps: ## sweep eps; FILE=path optional

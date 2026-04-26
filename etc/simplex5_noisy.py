@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# Generate noisy samples around vertices of regular 5-simplex (pure Python).
-# 6 clusters x `per` points, in R^5, side length 1, Gaussian noise.
+# Generate noisy samples around vertices of regular k-simplex embedded in R^N.
+# Signal in first k cols; remaining N-k cols are near-zero-variance filler.
+# Expect rash to discover ~k dims.
 import math, random
 
 def simplex(d, side=1.0):
@@ -14,11 +15,13 @@ def simplex(d, side=1.0):
   return [p + [0.0] for p in sub] + [[0.0]*(d-1) + [h]]
 
 random.seed(1)
-d, per = 5, 20
-verts  = simplex(d)
+K, N, PER = 3, 8, 20       # signal rank, total cols, rows per vertex
+SIG       = 0.02           # noise std on signal cols; filler cols are constant 0
+verts     = simplex(K)
 
-print(",".join(f"X{i+1}" for i in range(d)) + ",Goal-")
-for v in verts:
-  for _ in range(per):
-    r = [v[j] + random.gauss(0, 0.02) for j in range(d)]
-    print(",".join(f"{x:.4f}" for x in r) + ",0")
+print(",".join(f"X{i+1}" for i in range(N)) + ",Goal-")
+for i, v in enumerate(verts):
+  for _ in range(PER):
+    sig  = [v[j] + random.gauss(0, SIG) for j in range(K)]
+    fill = [0.0] * (N - K)
+    print(",".join(f"{x:.4f}" for x in sig + fill) + f",{i}")

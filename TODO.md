@@ -1,5 +1,41 @@
 # TODO
 
+## Outstanding from 2026-04-25 session
+
+- [ ] **poles() — pole-picking math unclear**. Need to derive on paper.
+
+  Goal: pick 2nd pole = point with max distance AND most perpendicular
+  to prev dims. Currently uses fastmap residual:
+
+      g2(r1, r2) = distx(r1, r2)^2 - sum_over_prev_dims( (x1-x2)^2 )
+
+  Claim (unverified): residual already mixes both — big d^2 = far,
+  parallel to prev dim shrinks residual via (x1-x2)^2 subtraction,
+  so perpendicular+far stays large. Need to convince self this is
+  what "perpendicular" really means here.
+
+  Geometry note (capture before forgotten):
+  - gap-dist  = distx(d, r1, r2)
+  - x, gap    = project(dim, d, r)   # proj returns x; gap = dim.gap
+  - need dw   because y = sqrt(max(0, de^2 - x^2))
+  - "max dist*angle is y*y/x" — meaning unclear, derive on paper
+
+  Open questions:
+  1. Is pairwise residual `g2 = d^2 - sum (x1-x2)^2` right scoring fn,
+     or want per-point y-based score?
+  2. If y-based: each r has y_k = sqrt(de_k^2 - x_k^2) per prev dim k.
+     Combine how? min, prod, avg?
+  3. Should `proj` return `(x, gap)` so callers don't reach dim.gap?
+  4. Algorithm:
+     - O(n^2) all-pairs (current).
+     - O(n) linear scan: anchor=t[0], find e=farthest, then w=farthest
+       from e. Standard fastmap heuristic.
+     - Cached projections: each r projects on each prev dim once
+       upfront, pairwise lookup O(prev). Faster.
+
+  Action: sketch math on paper, decide scoring fn, then pick algorithm
+  (linear scan + cached proj likely winner once scoring locked).
+
 ## Outstanding from 2026-04-23 session
 
 - [ ] **Auto-scale eps by dimensionality**. One-liner in `dims()`:

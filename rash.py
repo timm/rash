@@ -1,6 +1,21 @@
 #!/usr/bin/env python3 -B
 # rash.py: recursive axis-split clustering
 # (c) 2026 Tim Menzies, timm@ieee.org, MIT license
+
+# Naming (data types):
+#   c        Num|Sym       n        Num
+#   cs       list[Num|Sym] r,rs     Row, Rows
+#   d        Data          s        Sym
+#   dim,ds   Dim, list[Dim]
+#
+# Naming ( vars):
+#   at       col index     lab      labelled Data
+#   cuts     bin edges     mu,sd,m2 moments
+#   e,w,gap  poles         out      collector
+#   fn       fn            prev     prior list
+#   i,j      int           t        sample
+#   it       self          txt      str
+#   k        key           v        value
 """
 Options:
 
@@ -11,280 +26,278 @@ Options:
     --bins=6          bins per dim
     --few=32          pole sample size
     --dims=6          max dims
-    --file=auto93.csv   input csv
+    --file=auto93.csv input csv
 """
-from __future__ import annotations
 import re, sys, random
 from random import sample, shuffle
 from math import exp
 from types import SimpleNamespace as S
-from typing import Iterable, Iterator
 
-Atom = int | float | str
-Row  = list[Atom]
-Rows = list[Row]
-isa  = isinstance
+isa = isinstance
 
-# ---- 0. Utilities ----
-def o(x) -> str:
-  """Format recursively with 2dp floats."""
-  if isa(x, float): return f"{x:.2f}"
-  if isa(x, dict):
-    return "{" + ", ".join(f"{k}={o(v)}"
-           for k, v in sorted(x.items())) + "}"
-  if isa(x, list):  return "{" + ", ".join(map(o, x)) + "}"
-  if isa(x, S):     return "S" + o(x.__dict__)
-  return str(x)
+# ---- 0. Structs (simple to complex) ----
+def Col(txt="", at=0):
+  "Num if txt starts upper, else Sym."
+  return (Num if txt[:1].isupper() else Sym)(txt, at)
 
-def thing(txt: str) -> Atom:
-  """Coerce str to int/float/bool/str."""
-  txt = txt.strip()
-  b = lambda s: {"true": 1, "false": 0}.get(s.lower(), s)
-  for f in [int, float, b]:
-    try: return f(txt)
-    except ValueError: pass
-  return txt
-
-def csv(f: str) -> Iterator[Row]:
-  """Yield typed rows from file."""
-  with open(f, encoding="utf-8") as file:
-    for s in file:
-      r = s.partition("#")[0].split(",")
-      if any(x.strip() for x in r):
-        yield [thing(x) for x in r]
-
-# ---- 1. Columns ----
 class Num:
-  """Summarize stream of numbers."""
-  def __init__(i, txt: str="", a: int=0):
-    i.txt, i.at, i.n   = txt, a, 0
-    i.mu, i.m2, i.sd   = 0.0, 0.0, 0.0
-    i.heaven           = txt[-1:] != "-"
+  "Summarize numbers."
+  def __init__(it, txt="", at=0):
+    it.txt, it.at, it.n = txt, at, 0
+    it.mu, it.m2, it.sd = 0.0, 0.0, 0.0
+    it.heaven           = txt[-1:] != "-"
 
 class Sym:
-  """Summarize stream of symbols."""
-  def __init__(i, txt: str="", a: int=0):
-    i.txt, i.at, i.n, i.has = txt, a, 0, {}
+  "Summarize symbols."
+  def __init__(it, txt="", at=0):
+    it.txt, it.at, it.n, it.has = txt, at, 0, {}
 
-Col_t = Num | Sym
+class Cols:
+  "Organize columns from header names."
+  def __init__(it, names):
+    it.names = names
+    it.all   = [Col(t, j) for j, t in enumerate(names)]
+    it.xs    = [c for c in it.all if c.txt[-1] not in "+-!X"]
+    it.ys    = [c for c in it.all if c.txt[-1]     in "+-!"]
 
-def Col(txt: str="", a: int=0) -> Col_t:
-  """Num if txt starts uppercase, else Sym."""
-  return (Num if txt[:1].isupper() else Sym)(txt, a)
+class Data:
+  "Rows plus summarized columns."
+  def __init__(it, src=None):
+    src = iter(src or [])
+    it.rows, it.cols = [], Cols(next(src))
+    for r in src: add(it, r)
 
-def add(i, v, w: int = 1):
-  """Incremental update for Num/Sym/Data. w=-1 removes."""
-  if isa(i, Data):
-    for c in i.cols.all: add(c, v[c.at], w)
-    (i.rows.append if w > 0 else i.rows.remove)(v)
-    return v
-  if v == "?": return v
-  if isa(i, Sym): i.has[v] = w + i.has.get(v, 0)
-  elif w < 0 and i.n <= 2: i.n = i.mu = i.m2 = i.sd = 0
-  else:
-    i.n += w
-    d     = v - i.mu
-    i.mu += w * d / i.n
-    i.m2 += w * d * (v - i.mu)
-    i.sd  = (max(0, i.m2) / (i.n - 1))**.5 if i.n > 1 else 0
+class Dim:
+  "Fastmap axis: poles, gap, cuts."
+  def __init__(it, east, west, gap, cuts=None):
+    it.east, it.west = east, west
+    it.gap, it.cuts  = gap, cuts or []
+
+# ---- 1. Basics ----
+def sub(it, v): return add(it, v, -1)
+
+def adds(vs, it=None):
+  "Summarize numbers into it."
+  it = it or Num()
+  for v in vs: add(it, v)
+  return it
+
+def add(it, v, w=1):
+  "Update Num/Sym/Data; w=-1 removes."
+  if v != "?":
+    match it:
+      case Data():
+        add(it.cols, v, w)
+        (it.rows.append if w > 0 else it.rows.remove)(v)
+      case Cols():
+        for c in it.all: add(c, v[c.at], w)
+      case Sym():
+        it.has[v] = w + it.has.get(v, 0)
+      case Num() if w < 0 and it.n <= 2:
+        it.n = it.mu = it.m2 = it.sd = 0
+      case Num():
+        it.n  += w
+        delta  = v - it.mu
+        it.mu += w * delta / it.n
+        it.m2 += w * delta * (v - it.mu)
+        it.sd  = (max(0,it.m2)/(it.n-1))**.5 if it.n > 1 else 0
   return v
 
-def sub(i, v): return add(i, v, -1)
+def clone(d, rs=None):
+  "New Data, same cols, optional rows."
+  return Data([d.cols.names] + list(rs or []))
 
-def norm(i: Num, v: Atom) -> float | str:
-  """Logistic normalize a Num value."""
+def labelled(d):
+  "Clone with the.budget random rows."
+  rs = d.rows[:]; shuffle(rs)
+  return clone(d, rs[:the.budget])
+
+# ---- 2. Distance ----
+def norm(n, v):
+  "Logistic normalize Num value."
   if v == "?": return v
-  z = (v - i.mu) / (i.sd + 1e-32)
+  z = (v - n.mu) / (n.sd + 1e-32)
   z = max(-3, min(3, z))
   return 1 / (1 + exp(-1.7 * z))
 
-def adds(vs: Iterable[Atom], n: Num | None=None) -> Num:
-  """Summarize numbers into n (fresh Num by default)."""
-  n = n or Num()
-  for v in vs: add(n, v)
-  return n
+def minkowski(vs):
+  "Minkowski p-distance from iterable."
+  tot, i = 0.0, 1e-32
+  for v in vs: tot, i = tot + v**the.p, i + 1
+  return (tot / i) ** (1 / the.p)
 
-# ---- 2. Data ----
-class Cols:
-  """Organize columns from header names."""
-  def __init__(i, names: list[str]):
-    i.names = names
-    i.all   = [Col(t, j) for j, t in enumerate(names)]
-    i.xs    = [c for c in i.all if c.txt[-1] not in "+-!X"]
-    i.ys    = [c for c in i.all if c.txt[-1] in "+-!"]
-
-class Data:
-  """Rows plus summarized columns."""
-  def __init__(i, src: Iterable[Row] | None=None):
-    src    = iter(src or [])
-    i.cols = Cols(next(src))  # type: ignore[arg-type]
-    i.rows: Rows = []
-    for r in src: add(i, r)
-
-def clone(d: Data, rs: Rows | None=None) -> Data:
-  """New Data, same cols, optional rows."""
-  return Data([d.cols.names] + list(rs or []))
-
-# ---- 3. Distance ----
-def minkowski(xs: Iterable[float]) -> float:
-  """Minkowski p-distance from iterable."""
-  tot, n = 0.0, 1e-32
-  for x in xs: tot, n = tot + x**the.p, n + 1
-  return (tot / n) ** (1 / the.p)
-
-def aha(c: Col_t, u: Atom, v: Atom) -> float:
-  """Distance between two values on one column."""
+def aha(c, u, v):
+  "Distance between two values on one column."
   if u == v == "?": return 1
-  if isa(c, Sym): return float(u != v)
-  u, v = norm(c, u), norm(c, v)  # type: ignore[arg-type]
-  u = u if u != "?" else (0 if v > 0.5 else 1)
-  v = v if v != "?" else (0 if u > 0.5 else 1)
-  return abs(u - v)
+  match c:
+    case Sym(): return float(u != v)
+    case _:
+      u, v = norm(c, u), norm(c, v)
+      u = u if u != "?" else (0 if v > 0.5 else 1)
+      v = v if v != "?" else (0 if u > 0.5 else 1)
+      return abs(u - v)
 
-def distx(d: Data, a: Row, b: Row) -> float:
-  """Distance between rows on X-cols."""
-  return minkowski(aha(c, a[c.at], b[c.at]) for c in d.cols.xs)
+def distx(d, r1, r2):
+  "Distance between rows on X-cols."
+  return minkowski(aha(c, r1[c.at], r2[c.at])
+                   for c in d.cols.xs)
 
-def disty(d: Data, r: Row) -> float:
-  """Distance to heaven on Y-cols."""
-  return minkowski(abs(norm(c, r[c.at]) - c.heaven)  # type: ignore[operator]
+def disty(d, r):
+  "Distance to heaven on Y-cols."
+  return minkowski(abs(norm(c, r[c.at]) - c.heaven)
                    for c in d.cols.ys)
 
-# ---- 4. Dim ----
-class Dim:
-  """Fastmap axis: two poles, gap, cut points."""
-  def __init__(i, east: Row, west: Row, gap: float, cuts: list[float] | None=None):
-    i.east, i.west, i.gap, i.cuts = east, west, gap, cuts or []
+def proj(dim, d, r):
+  "Project r onto east-west via fastmap (uses gap)."
+  de = distx(d, r, dim.east)
+  dw = distx(d, r, dim.west)
+  return (de*de + dim.gap*dim.gap - dw*dw) / (2*dim.gap+1e-32)
 
-def proj(i: Dim, d: Data, r: Row) -> float:
-  """Project r onto east-west via fastmap."""
-  de, dw = distx(d, r, i.east), distx(d, r, i.west)
-  return (de*de + i.gap*i.gap - dw*dw) / (2*i.gap + 1e-32)
+# ---- 3. Fastmap ----
+def index(dim, d, r):
+  "Bin index of r on this axis."
+  p = proj(dim, d, r)
+  for k, cut in enumerate(dim.cuts):
+    if p <= cut: return k
+  return len(dim.cuts)
 
-def index(i: Dim, d: Data, r: Row) -> int:
-  """Bin index of r on this axis."""
-  p = proj(i, d, r)
-  for k, c in enumerate(i.cuts):
-    if p <= c: return k
-  return len(i.cuts)
-
-def poles(d: Data, rs: Rows, prev: list[Dim]) -> tuple[Row, Row, float]:
-  """Pick 2 poles maximizing residual dist after prev dims."""
+def poles(d, rs, prev):
+  "Pick 2 poles maximizing residual dist."
   t = sample(rs, min(the.few, len(rs)))
-  def r2(a: Row, b: Row) -> float:
-    dx2 = distx(d, a, b) ** 2
-    for p in prev:
-      ax  = proj(p, d, a) - proj(p, d, b)
+  def gap2(r1, r2):
+    dx2 = distx(d, r1, r2) ** 2
+    for dim in prev:
+      ax  = proj(dim, d, r1) - proj(dim, d, r2)
       dx2 = max(0, dx2 - ax*ax)
     return dx2
-  g2, e, w = max(((r2(a, b), a, b) for a in t for b in t),
-                 key=lambda z: z[0])
+  g2,e,w = max(((gap2(r1,r2), r1, r2) for r1 in t for r2 in t),
+               key=lambda z: z[0])
   return e, w, g2 ** .5
 
-def newDim(d: Data, rs: Rows, epsx: float, prev: list[Dim]) -> Dim | None:
-  """Build next Dim with equal-width bins; None if gap < epsx."""
+def newDim(d, rs, epsx, prev):
+  "Build next Dim; None if gap < epsx."
   e, w, gap = poles(d, rs, prev)
   if gap < epsx: return None
   step = gap / the.bins
-  cuts = [step * (i + 1) for i in range(int(the.bins) - 1)]
+  cuts = [step*(i+1) for i in range(int(the.bins)-1)]
   return Dim(e, w, gap, cuts)
 
-def dims(d: Data, rs: Rows) -> list[Dim]:
-  """Grow Dims; stop on first no-split or cap."""
+def dims(d, rs):
+  "Grow Dims; stop on no-split or cap."
   t    = sample(rs, min(the.few, len(rs)))
-  xSd  = adds(distx(d, a, b) for a in t for b in t if a is not b).sd
+  xSd  = adds(distx(d, r1, r2) for r1 in t for r2 in t
+              if r1 is not r2).sd
   epsx = the.eps * xSd
-  out: list[Dim] = []
+  out  = []
   while len(out) < the.dims:
     dim = newDim(d, rs, epsx, out)
     if dim is None: break
     out.append(dim)
   return out
 
-def clusters(d: Data, rs: Rows, ds: list[Dim]) -> dict[tuple[int, ...], Rows]:
-  """Group rows by joint Dim-index tuple."""
-  out: dict[tuple[int, ...], Rows] = {}
+def clusters(d, rs, ds):
+  "Group rows by joint Dim-index tuple."
+  out = {}
   for r in rs:
-    k = tuple(index(x, d, r) for x in ds)
+    k = tuple(index(dim, d, r) for dim in ds)
     out.setdefault(k, []).append(r)
   return out
 
-def labelled(d: Data) -> Data:
-  """Clone with the.budget random rows."""
-  rs = d.rows[:]; shuffle(rs)
-  return clone(d, rs[:the.budget])
+# ---- 4. Utilities ----
+def o(x):
+  "Format recursive, 2dp floats."
+  if isa(x, float): return f"{x:.2f}"
+  if isa(x, dict):
+    return "{" + ", ".join(f"{k}={o(v)}"
+           for k, v in sorted(x.items())) + "}"
+  if isa(x, list): return "{" + ", ".join(map(o, x)) + "}"
+  if isa(x, S):    return "S" + o(x.__dict__)
+  if hasattr(x, "__dict__"):
+    return x.__class__.__name__ + o(x.__dict__)
+  return str(x)
 
-# ---- 5. Tests ----
+def thing(txt):
+  "Coerce str to int/float/bool/str."
+  txt = txt.strip()
+  for fn in [int, float]:
+    try: return fn(txt)
+    except ValueError: pass
+  return {"true":True, "false":False}.get(txt.lower(), txt)
+
+def csv(f):
+  "Yield typed rows from file."
+  with open(f, encoding="utf-8") as file:
+    for line in file:
+      r = line.partition("#")[0].split(",")
+      if any(x.strip() for x in r):
+        yield [thing(x) for x in r]
+
+# ---- 5. Tests ----
 def test__the():
-  """Print config."""
+  "Print config."
   print(o(the.__dict__))
 
 def test__data():
-  """Load file, show shape."""
+  "Load file, show shape."
   d = Data(csv(the.file))
   print("rows", len(d.rows),
         "x", len(d.cols.xs), "y", len(d.cols.ys))
 
 def test__dim():
-  """Build dims on labelled subset; report clusters."""
+  "Build dims on labelled subset."
   d   = Data(csv(the.file))
   lab = labelled(d)
   ds  = dims(lab, lab.rows)
-  cs  = clusters(lab, lab.rows, ds)
-  print("dims", len(ds), "clusters", len(cs),
-        "bins", [len(x.cuts) + 1 for x in ds])
+  groups = clusters(lab, lab.rows, ds)
+  print("dims", len(ds), "clusters", len(groups),
+        "bins", [len(dim.cuts)+1 for dim in ds])
 
 def test__4d():
-  """7D data, only 4 dims have spread. Should find ~4 dims, not 7."""
+  "7D data, 4 dims have spread."
   import os
   path = "etc/spread4of7.csv"
   if not os.path.exists(path):
-    print("skip: run `python3 etc/spread4of7.py > etc/spread4of7.csv` first"); return
+    print("skip: gen etc/spread4of7.csv first"); return
   d   = Data(csv(path))
   lab = labelled(d)
   ds  = dims(lab, lab.rows)
-  cs  = clusters(lab, lab.rows, ds)
-  print("4d test: dims", len(ds), "clusters", len(cs),
-        "bins", [len(x.cuts) + 1 for x in ds])
-  assert len(ds) <= 5, f"expected ~4 dims, got {len(ds)}"
+  groups = clusters(lab, lab.rows, ds)
+  print("4d test: dims", len(ds), "clusters", len(groups),
+        "bins", [len(dim.cuts)+1 for dim in ds])
+  assert len(ds) <= 5, f"want ~4 dims, got {len(ds)}"
 
 def test__simplex():
-  """Noisy 5-simplex: 6 vertices x 20 rows. Rank-5; expect ~5 dims."""
+  "Noisy 5-simplex: expect ~5 dims."
   import os
   path = "etc/simplex5.csv"
   if not os.path.exists(path):
-    print("skip: run `make etc/simplex5.csv` first"); return
+    print("skip: make etc/simplex5.csv first"); return
   d   = Data(csv(path))
   lab = labelled(d)
   ds  = dims(lab, lab.rows)
-  cs  = clusters(lab, lab.rows, ds)
-  print("simplex dims", len(ds), "clusters", len(cs),
-        "bins", [len(x.cuts) + 1 for x in ds])
-
-def _tests():
-  return [(k, v) for k, v in globals().items()
-          if k.startswith("test__") and k != "test__all"]
+  groups = clusters(lab, lab.rows, ds)
+  print("simplex dims", len(ds), "clusters", len(groups),
+        "bins", [len(dim.cuts)+1 for dim in ds])
 
 def test__all():
-  """Run every test__ function."""
-  for k, v in _tests(): print(f"# {k}"); v()
+  "Run every test__ function; reseed each."
+  for k, v in globals().items():
+    if k.startswith("test__") and k != "test__all":
+      random.seed(the.seed); print(f"# {k}"); v()
 
-# ---- Ready, set, go. ----
-the = S()
-for k, v in re.findall(r"([\w.]+)=(\S+)", __doc__ or ""):
-  setattr(the, k, thing(v))
+# ---- 6. Main ----
+the = S(**{k: thing(v) for k, v in
+           re.findall(r"(\w+)=(\S+)", __doc__ or "")})
 
-def parseArgs(argv: list[str]) -> list[str]:
-  """Parse --k=v flags into `the`, collect bare --t as test names."""
-  tests: list[str] = []
+def cli(argv):
+  "Parse --k=v into `the`; bare --t runs test."
   for a in argv:
     if a.startswith("--"):
       if "=" in a:
-        k, v = a[2:].split("=", 1); setattr(the, k, thing(v))
-      else: tests.append(a[2:])
-  return tests
+        k, v = a[2:].split("=", 1)
+        setattr(the, k, thing(v))
+      elif fn := globals().get(f"test__{a[2:]}"):
+        random.seed(the.seed)
+        fn()
 
-if __name__ == "__main__":
-  random.seed(the.seed)
-  for t in parseArgs(sys.argv[1:]):
-    if fn := globals().get(f"test__{t}"): fn()
+if __name__ == "__main__": cli(sys.argv[1:])
