@@ -52,6 +52,14 @@ sh: ## launch dev shell (banner + etc/bash.rc)
 	      -o - $< | ps2pdf - $@
 	@open $@
 
+PYCCO := $(HOME)/tmp
+
+$(PYCCO)/%.html : %.py
+	@mkdir -p $(PYCCO)
+	gawk -f $(GIT_ROOT)/etc/py2md.awk $< > $(PYCCO)/$<
+	pycco -d $(PYCCO)  $(PYCCO)/$^
+	echo "p {text-align: right;}" >> $(PYCCO)/pycco.css
+
 eps: ## sweep eps; FILE=path optional
 	@for e in 0.01 0.05 0.1 0.2 0.35 0.5; do \
 		printf "eps=%s  " $$e; \
