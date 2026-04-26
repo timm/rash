@@ -11,7 +11,7 @@
 # Naming (vars):
 #   at       col index     out      collector
 #   lst      sample        fn       fn
-#   it       self          txt      str
+#   i        self          txt      str
 #   k,v      key,value     i        int
 """
 Options:
@@ -19,15 +19,15 @@ Options:
     --seed=1          random seed
     --p=2             Minkowski p
     --eps=0.35        margin multiplier
-    --budget=30       label budget
-    --bins=6          bins per dim
+    --budget=50       label budget
+    --bins=16          bins per dim
     --few=32          pole sample size
-    --dims=6          max dims
+    --dims=16          max dims
     --file=auto93.csv input csv
 """
 import re, sys, random
 from random import sample, shuffle
-from math import exp,sqrt,atan2
+from math import exp,sqrt
 from types import SimpleNamespace as S
 
 isa = isinstance
@@ -39,65 +39,67 @@ def Col(txt="", at=0):
 
 class Num:
   "Summarize numbers."
-  def __init__(it, txt="", at=0):
-    it.txt, it.at, it.n = txt, at, 0
-    it.mu, it.m2, it.sd = 0.0, 0.0, 0.0
-    it.heaven           = txt[-1:] != "-"
+  def __init__(i, txt="", at=0):
+    i.txt, i.at, i.n = txt, at, 0
+    i.mu, i.m2, i.sd = 0.0, 0.0, 0.0
+    i.heaven           = txt[-1:] != "-"
 
 class Sym:
   "Summarize symbols."
-  def __init__(it, txt="", at=0):
-    it.txt, it.at, it.n, it.has = txt, at, 0, {}
+  def __init__(i, txt="", at=0):
+    i.txt, i.at, i.n, i.has = txt, at, 0, {}
 
 class Roles:
   "Organize columns from header names."
-  def __init__(it, names):
-    it.names = names
-    it.all = [Col(t, j) for j, t in enumerate(names)]
-    it.xs  = [col for col in it.all if col.txt[-1] not in "+-!X"]
-    it.ys  = [col for col in it.all if col.txt[-1]     in "+-!"]
+  def __init__(i, names):
+    i.names = names
+    i.all = [Col(t, j) for j, t in enumerate(names)]
+    i.xs  = [col for col in i.all if col.txt[-1] not in "+-!X"]
+    i.ys  = [col for col in i.all if col.txt[-1]     in "+-!"]
 
 class Data:
   "Rows plus summarized columns."
-  def __init__(it, src=None):
+  def __init__(i, src=None):
     src = iter(src or [])
-    it.rows, it.roles = [], Roles(next(src))
-    for row in src: add(it, row)
+    i.rows, i.roles = [], Roles(next(src))
+    for row in src: add(i, row)
 
 class Dim:
-  "Fastmap axis: poles, gap, cuts."
-  def __init__(it, east, west, gap, cuts=None):
-    it.east, it.west = east, west
-    it.gap, it.cuts  = gap, cuts or []
+  "Fastmap axis: poles, gap, cuts, next pole hint."
+  def __init__(i, east, west, gap):
+    i.east, i.west, i.gap = east, west, gap
+    step   = gap / the.bins
+    i.cuts = [step*(k+1) for k in range(int(the.bins)-1)]
+    i.north = None
 
 ### 1. Basics ---------------------------------------
-def sub(it, v): return add(it, v, -1)
+def sub(i, v): return add(i, v, -1)
 
-def adds(vs, it=None):
-  "Summarize numbers into it."
-  it = it or Num()
-  for v in vs: add(it, v)
-  return it
+def adds(vs, i=None):
+  "Summarize numbers into i."
+  out = i or Num()
+  for v in vs: add(out, v)
+  return out
 
-def add(o, v, w=1):
+def add(i, v, w=1):
   "Update Num/Sym/Data; w=-1 removes."
   if v == "?": return v
-  match o:
+  match i:
     case Data():
-      add(o.roles, v, w)
-      (o.rows.append if w > 0 else o.rows.remove)(v)
+      add(i.roles, v, w)
+      (i.rows.append if w > 0 else i.rows.remove)(v)
     case Roles():
-      for col in o.all: add(col, v[col.at], w)
+      for col in i.all: add(col, v[col.at], w)
     case Sym():
-      o.has[v] = w + o.has.get(v, 0)
-    case Num() if w < 0 and o.n <= 2:
-      o.n = o.mu = o.m2 = o.sd = 0
+      i.has[v] = w + i.has.get(v, 0)
+    case Num() if w < 0 and i.n <= 2:
+      i.n = i.mu = i.m2 = i.sd = 0
     case Num():
-      o.n  += w
-      delta  = v - o.mu
-      o.mu += w * delta / o.n
-      o.m2 += w * delta * (v - o.mu)
-      o.sd  = 0 if o.n<2 else sqrt(max(0,o.m2)/(o.n-1)) if o.n>1
+      i.n  += w
+      delta  = v - i.mu
+      i.mu += w * delta / i.n
+      i.m2 += w * delta * (v - i.mu)
+      i.sd  = 0 if i.n<2 else sqrt(max(0,i.m2)/(i.n-1))
   return v
 
 def clone(data, rows=None):
@@ -144,37 +146,6 @@ def disty(data, row):
   return minkowski(abs(norm(col, row[col.at]) - col.heaven)
                    for col in data.roles.ys)
 
-#   Two different jobs:
-#
-#   East (1 row): offaxis(row) uses cosine(...)[1] = y. Score = "how off-axis is this single row vs prev
-#   dims". Pick row with max y → it points in a new direction.
-#
-#   West (1 row, paired with east): residual2(east, other) = pairwise distance between east and
-#   candidate, MINUS distance already explained by prev dims. Picks row farthest from east in the new
-#   direction.
-#
-#   Why different formulas:
-#   - y/theta from cosine measures ONE row's deviation from ONE existing dim.
-#   - For west you need a pair distance (east ↔ candidate) to define an axis with a real gap.
-#
-#   If you used y*theta for west: you'd get the second-most off-axis row. Risk: it sits next to east in
-#   the new direction → tiny gap → useless axis.
-#
-#   residual2 ensures west is far from east specifically in the unexplained subspace.
-#
-#   If you want symmetry/simplicity:
-#
-#   # Pick top-2 by offaxis. Cheap but risky (poles may cluster).
-#   east, west = sorted(rows[:n], key=offaxis, reverse=True)[:2]
-#
-#   Use only if your data spreads evenly off-axis. Otherwise keep residual2.
-#
-# ✻ Brewed for 46s
-#
-# ───────────────────────────────────────────────────────────────────────────────────────────────────────
-# ❯ now i understand resutaul2.
-#
-#
 def proj(dim, data, row):
   "Project row onto east-west via fastmap (uses gap)."
   de = distx(data, row, dim.east)
@@ -182,13 +153,13 @@ def proj(dim, data, row):
   return (de*de + dim.gap*dim.gap - dw*dw) / (2*dim.gap+1e-32)
 
 def cosine(data, dim, row):
-  "x=along axis, y=perp dist, theta=angle from east."
+  "S(row, x=along axis, y=perp dist, theta=y/|x|)."
   a = distx(data, row, dim.east)
   b = distx(data, row, dim.west)
   c = dim.gap
   x = (a*a + c*c - b*b) / (2*c)
   y = max(0, a*a - x*x) ** .5
-  return x, y, atan2(y, x)
+  return S(row=row, x=x, y=y, theta=y/abs(x+1e-32))
 
 ### 3. Fastmap ---------------------------------------
 def index(dim, data, row):
@@ -198,37 +169,56 @@ def index(dim, data, row):
     if p <= cut: return k
   return len(dim.cuts)
 
-def nextDim(data, rows, prev):
-  "Pick 2 poles maximizing residual dist."
-  n = min(the.few, len(rows))
-  def fn(row, dim):
-    x, y, theta = cosine(data,dim,row)
-    return y*theta, x, y 
-  _, east, west = max((fn(rows[i], dim)
-                      for i in range(n) for dim in prev)
-                      key=lambda z: z[0])
-  return east, west, g2 ** .5
+def newDim(data, rows, epsx, east=None):
+  "Build Dim or None if gap < epsx."
+  D    = lambda r1,r2: distx(data, r1, r2)
+  lst  = sample(rows, min(the.few, len(rows)))
+  east = east or max(lst, key=lambda r: D(r, lst[0]))
+  west = max(lst, key=lambda r: D(r, east))
+  if (gap := D(east, west)) > epsx:
+    dim = Dim(east, west, gap)
+    ps  = [cosine(data, dim, row) for row in lst]
+    n   = max(ps, key=lambda p: p.theta)
+    dim.north = max(ps, key=lambda p: p.x*n.x + p.y*n.y).row
+    return dim
 
-def newDim(data, rows, epsx, prev):
-  "Build next Dim; None if gap < epsx."
-  e, west, gap = poles(data, rows, prev)
-  if gap < epsx: return None
-  step = gap / the.bins
-  cuts = [step*(i+1) for i in range(int(the.bins)-1)]
-  return Dim(e, west, gap, cuts)
+# do not delete. lessons learned. of ten first few
+# dimensions get no cs since n+1 dims test for orthongality .
+# so earleuer dimensions can be irrelvancies.
+def sweepCuts(dim, data, rows, least=2):
+  "Y-supervised sweep: cut where disty variance reduces."
+  pairs = sorted((proj(dim, data, r), disty(data, r)) for r in rows)
+  whole = adds(y for _,y in pairs)
+  if whole.sd < 1e-9 or whole.n < 2*least: return []
+  right = adds(y for _,y in pairs)
+  left, cuts, last = Num(), [], 0
+  for k,(x,y) in enumerate(pairs[:-1]):
+    add(left, sub(right, y))
+    if (left.n >= least and right.n >= least
+        and k - last >= least
+        and x != pairs[k+1][0]
+        and (left.n*left.sd + right.n*right.sd) / whole.n < whole.sd):
+      cuts.append((x + pairs[k+1][0]) / 2)
+      last = k
+  return cuts
 
 def newDims(data, rows):
-  "Grow Dims; stop on no-split or cap."
-  lst  = sample(rows, min(the.few, len(rows)))
-  xSd  = adds(distx(data, row1, row2) for row1 in lst for row2 in lst
-              if row1 is not row2).sd
-  epsx = the.eps * xSd
-  out  = []
+  "Grow dims on sample, Y-supervised sweep prune."
+  lst = sample(rows, min(the.few, len(rows)))
+  x   = adds(distx(data, *sample(lst,2)) for _ in range(the.few))
+  out, east, now = [], None, {}
   while len(out) < the.dims:
-    dim = newDim(data, rows, epsx, out)
-    if dim is None: break
-    out.append(dim)
-  return out
+    if dim := newDim(data, rows, the.eps*x.sd, east):
+      out.append(dim)
+      nxt = clusters(data, rows, out)
+      if len(nxt) > len(now):
+        now, east = nxt, dim.north
+      else:
+        out.pop(); break
+    else: break
+  for dim in out:
+    dim.cuts = sweepCuts(dim, data, rows, least=2*len(out))
+  return [dim for dim in out if dim.cuts]
 
 def clusters(data, rows, dims):
   "Group rows by joint Dim-index tuple."
@@ -279,13 +269,14 @@ def test__data():
         "x", len(data.roles.xs), "y", len(data.roles.ys))
 
 def test__dim():
-  "Build dims on labelled subset."
+  "Build dims on sample vs all, cluster all data."
   data = Data(csv(the.file))
   lab  = labelled(data)
   dims = newDims(lab, lab.rows)
-  groups = clusters(lab, lab.rows, dims)
-  print("dims", len(dims), "clusters", len(groups),
-        "bins", [len(dim.cuts)+1 for dim in dims])
+  groups = clusters(lab, data.rows, dims)
+  print(f"rows={len(data.rows)} budget={len(lab.rows)} dims={len(dims)} clusters={len(groups)}")
+  for j,dim in enumerate(dims):
+    print(f"  dim{j}: {len(dim.cuts)+1} bins")
 
 def test__4d():
   "7D data, 4 dims have spread."
