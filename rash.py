@@ -208,14 +208,12 @@ def newDims(data, rows):
   x   = adds(distx(data, *sample(lst,2)) for _ in range(the.few))
   out, east, now = [], None, {}
   while len(out) < the.dims:
-    if dim := newDim(data, rows, the.eps*x.sd, east):
-      out.append(dim)
-      nxt = clusters(data, rows, out)
-      if len(nxt) > len(now):
-        now, east = nxt, dim.north
-      else:
-        out.pop(); break
-    else: break
+    dim = newDim(data, rows, the.eps*x.sd, east)
+    if not dim: break
+    nxt = clusters(data, rows, out + [dim])
+    if len(nxt) <= len(now): break
+    out.append(dim)
+    now, east = nxt, dim.north
   for dim in out:
     dim.cuts = sweepCuts(dim, data, rows, least=2*len(out))
   return [dim for dim in out if dim.cuts]
