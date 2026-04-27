@@ -20,9 +20,9 @@ Options:
     --p=2             Minkowski p
     --eps=0.35        margin multiplier
     --budget=50       label budget
-    --bins=16          bins per dim
+    --bins=10         bins per dim
     --few=32          pole sample size
-    --dims=16          max dims
+    --dims=10         max dims
     --file=auto93.csv input csv
 """
 import re, sys, random
@@ -272,9 +272,10 @@ def test__dim():
   lab  = labelled(data)
   dims = newDims(lab, lab.rows)
   groups = clusters(lab, data.rows, dims)
-  print(f"rows={len(data.rows)} budget={len(lab.rows)} dims={len(dims)} clusters={len(groups)}")
-  for j,dim in enumerate(dims):
-    print(f"  dim{j}: {len(dim.cuts)+1} bins")
+  print(f"rows={len(data.rows)}, budget={len(lab.rows)}, ",end=" ")
+  print(f"clusters={len(groups)}, dims={len(dims)},  [",end="")
+  print(*[f"{len(dim.cuts)+1}" for dim in dims],sep=",",end="], ")
+  print(re.sub(".*/","",the.file))
 
 def test__4d():
   "7D data, 4 dims have spread."
