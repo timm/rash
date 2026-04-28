@@ -16,6 +16,13 @@ help: ## show help
 	      {printf "  \033[36m%-20s\033[0m %s\n",$$1,$$2}' \
 	      $(MAKEFILE_LIST)
 
+TOOLS = bat gawk
+
+codespace:
+	@sudo apt update -qq
+	@for t in $(TOOLS); do command -v $$t >/dev/null \
+          || sudo apt install -y $$t; done
+
 pyclean: ## remove python temporaries
 	@find $(GIT_ROOT) -type d \
 	      \( -name __pycache__ -o -name .pytest_cache \
