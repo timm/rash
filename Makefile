@@ -26,12 +26,12 @@ push: ## commit with prompted msg and push
 	 git commit -am "$$msg"; git push; git status
 
 # Test runner targets
-CSVS = ls -r $(HOME)/gits/moot/optimize/*/*.csv | xargs -P 24 -I{} sh -c
+CSVS = ls $(HOME)/gits/moot/optimize/*/*.csv | sort -R | xargs -P 24 -I{} sh -c
 
 ~/tmp/rash_dim.log:  ## run ez_acq tests
 	@mkdir -p ~/tmp
-	@$(CSVS) 'python3 -B rash.py --file={} --dim ' | tee $@
-	gawk 'BEGIN{FS="=|,"} {print $$6}' $@ | sort -n | fmt -95
+	@$(CSVS) 'python3 -B rash.py --elite=0.25 --file={} --dim ' | tee $@
+	gawk 'BEGIN{FS="=|,"} {print $$6}' $@ | sort -n | fmt -85
 
 etc/simplex5.csv: etc/simplex5_noisy.py
 	@python3 $< > $@

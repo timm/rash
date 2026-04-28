@@ -15,6 +15,7 @@ export EDITOR="$(command -v nano)"
 export BASH_SILENCE_DEPRECATION_WARNING=1
 export HISTSIZE=10000
 export HISTFILESIZE=20000
+export PATH="$PATH:/Users/timm/.local/bin"
 
 # bash-only history behavior
 if [ -n "$BASH_VERSION" ]; then

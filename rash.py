@@ -23,6 +23,7 @@ Options:
     --bins=10         bins per dim
     --few=32          pole sample size
     --dims=10         max dims
+    --elite=0.5       quantile cut for best
     --file=auto93.csv input csv
 """
 import re, sys, random
@@ -70,7 +71,7 @@ class Dim:
     i.east, i.west, i.gap = east, west, gap
     step   = gap / the.bins
     i.cuts = [step*(k+1) for k in range(int(the.bins)-1)]
-    i.north = None
+    i.north = i.south = None
 
 ### 1. Basics ---------------------------------------
 def sub(i, v): return add(i, v, -1)
@@ -131,10 +132,10 @@ def aha(col, u, v):
   match col:
     case Sym(): return float(u != v)
     case _:
-      u, v = norm(col, u), norm(col, v)
-      u = u if u != "?" else (0 if v > .5 else 1)
-      v = v if v != "?" else (0 if u > .5 else 1)
-      return abs(u - v)
+      a, b = norm(col, u), norm(col, v)
+      if a == "?": a = 0 if isa(b,float) and b > .5 else 1
+      if b == "?": b = 0 if isa(a,float) and a > .5 else 1
+      return abs(a - b)
 
 def distx(data, row1, row2):
   "Distance between rows on X-cols."
@@ -169,17 +170,20 @@ def index(dim, data, row):
     if p <= cut: return k
   return len(dim.cuts)
 
-def newDim(data, rows, epsx, east=None):
+def newDim(data, rows, epsx, east=None, west=None):
   "Build Dim or None if gap < epsx."
   D    = lambda r1,r2: distx(data, r1, r2)
-  lst  = sample(rows, min(the.few, len(rows)))
-  east = east or max(lst, key=lambda r: D(r, lst[0]))
-  west = max(lst, key=lambda r: D(r, east))
+  if not (east and west):
+    lst  = sample(rows, min(the.few, len(rows)))
+    east = east or max(lst, key=lambda r: D(r, lst[0]))
+    west = max(lst, key=lambda r: D(r, east))
   if (gap := D(east, west)) > epsx:
     dim = Dim(east, west, gap)
+    lst = sample(rows, min(the.few, len(rows)))
     ps  = [cosine(data, dim, row) for row in lst]
-    n   = max(ps, key=lambda p: p.theta)
-    dim.north = max(ps, key=lambda p: p.x*n.x + p.y*n.y).row
+    n   = max(ps, key=lambda p: p.y)
+    s   = min(ps, key=lambda p: (p.x - n.x)**2 + p.y**2)
+    dim.north, dim.south = n.row, s.row
     return dim
 
 # do not delete. lessons learned. of ten first few
@@ -206,17 +210,19 @@ def newDims(data, rows):
   "Grow dims on sample, Y-supervised sweep prune."
   lst = sample(rows, min(the.few, len(rows)))
   x   = adds(distx(data, *sample(lst,2)) for _ in range(the.few))
-  out, east, now = [], None, {}
+  out, east, west, now = [], None, None, {}
   while len(out) < the.dims:
-    dim = newDim(data, rows, the.eps*x.sd, east)
+    epsx = 0 if not out else the.eps*x.sd
+    dim = newDim(data, rows, epsx, east, west)
     if not dim: break
     nxt = clusters(data, rows, out + [dim])
-    if len(nxt) <= len(now): break
+    if out and len(nxt) <= len(now): break
     out.append(dim)
-    now, east = nxt, dim.north
+    now, east, west = nxt, dim.north, dim.south
   for dim in out:
-    dim.cuts = sweepCuts(dim, data, rows, least=2*len(out))
-  return [dim for dim in out if dim.cuts]
+    cuts = sweepCuts(dim, data, rows, least=2*len(out))
+    if cuts: dim.cuts = cuts
+  return out
 
 def clusters(data, rows, dims):
   "Group rows by joint Dim-index tuple."
@@ -225,6 +231,19 @@ def clusters(data, rows, dims):
     k = tuple(index(dim, data, row) for dim in dims)
     out.setdefault(k, []).append(row)
   return out
+
+def best(data, groups):
+  "Clusters with mu(disty) below the.elite quantile of all rows. Best first."
+  if not groups:
+    rows = sorted(data.rows, key=lambda r: disty(data,r))
+    n = max(1, len(rows) // int(the.bins))
+    groups = {(k,): rows[k*n:(k+1)*n] for k in range(int(the.bins))}
+  ys     = sorted(disty(data,r) for r in data.rows)
+  thresh = ys[int(len(ys) * the.elite)]
+  scored = sorted((adds(disty(data,r) for r in rs).mu, rs)
+                  for rs in groups.values())
+  out    = [rs for mu,rs in scored if mu < thresh]
+  return out or [scored[0][1]]
 
 ### 4. Utilities ---------------------------------------
 def o(x):
@@ -272,8 +291,11 @@ def test__dim():
   lab  = labelled(data)
   dims = newDims(lab, lab.rows)
   groups = clusters(lab, data.rows, dims)
+  good = best(data, groups)
+  alln = sum(1 for rs in groups.values() if len(rs) >= 2)
   print(f"rows={len(data.rows)}, budget={len(lab.rows)}, ",end=" ")
-  print(f"clusters={len(groups)}, dims={len(dims)},  [",end="")
+  print(f"best={len(good)}, all={alln}, "
+        f"dims={len(dims)},  [",end="")
   print(*[f"{len(dim.cuts)+1}" for dim in dims],sep=",",end="], ")
   print(re.sub(".*/","",the.file))
 
@@ -303,6 +325,20 @@ def test__simplex():
   groups = clusters(lab, lab.rows, dims)
   print("simplex dims", len(dims), "clusters", len(groups),
         "bins", [len(dim.cuts)+1 for dim in dims])
+
+def test__best():
+  "Count all clusters vs best (>half rows in top-sqrt(N) elite)."
+  data = Data(csv(the.file))
+  lab  = labelled(data)
+  dims = newDims(lab, lab.rows)
+  groups = clusters(lab, data.rows, dims)
+  good = best(data, groups)
+  whole = adds(disty(data,r) for r in data.rows)
+  print(f"all={len(groups)}, best={len(good)}, "
+        f"whole.mu={whole.mu:.3f}")
+  for rs in good:
+    s = adds(disty(data,r) for r in rs)
+    print(f"  n={len(rs)}, mu={s.mu:.3f}, sd={s.sd:.3f}")
 
 def test__all():
   "Run every test__ function; reseed each."
