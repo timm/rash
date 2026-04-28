@@ -24,6 +24,7 @@ Options:
     --few=32          pole sample size
     --dims=10         max dims
     --elite=0.5       quantile cut for best
+    --check=3         holdout labels
     --file=auto93.csv input csv
 """
 import re, sys, random
@@ -206,8 +207,15 @@ def sweepCuts(dim, data, rows, least=2):
       last = k
   return cuts
 
-def newDims(data, rows):
-  "Grow dims on sample, Y-supervised sweep prune."
+def pruneDims(dims, data, rows, least=2):
+  "Y-supervised sweep prune on each dim."
+  for dim in dims:
+    cuts = sweepCuts(dim, data, rows, least=least)
+    if cuts: dim.cuts = cuts
+  return dims
+
+def newDims(data, rows, lab=None):
+  "Grow dims on sample, then prune cuts via lab or data."
   lst = sample(rows, min(the.few, len(rows)))
   x   = adds(distx(data, *sample(lst,2)) for _ in range(the.few))
   out, east, west, now = [], None, None, {}
@@ -219,10 +227,7 @@ def newDims(data, rows):
     if out and len(nxt) <= len(now): break
     out.append(dim)
     now, east, west = nxt, dim.north, dim.south
-  for dim in out:
-    cuts = sweepCuts(dim, data, rows, least=2*len(out))
-    if cuts: dim.cuts = cuts
-  return out
+  return pruneDims(out, lab or data, lab.rows if lab else rows, 2*len(out))
 
 def clusters(data, rows, dims):
   "Group rows by joint Dim-index tuple."
@@ -244,6 +249,39 @@ def best(data, groups):
                   for rs in groups.values())
   out    = [rs for mu,rs in scored if mu < thresh]
   return out or [scored[0][1]]
+
+def wins(data):
+  "Scorer: 100=best, 0=median, relative to all rows."
+  ds = sorted(disty(data, r) for r in data.rows)
+  lo, med = ds[0], ds[len(ds)//2]
+  return lambda r: int(100*(1 - (disty(data,r)-lo) / (med-lo+1e-32)))
+
+def acquire(data):
+  "Cluster-classify pipeline: train on B, predict on holdout, label top C."
+  rows = data.rows[:]; shuffle(rows)
+  mid  = len(rows) // 2
+  train, test = rows[:mid], rows[mid:]
+  train_data = clone(data, train)
+  lab  = labelled(train_data)
+  # dims from all train (x-structure), sweepCuts from lab (y-supervised)
+  dims = newDims(train_data, train, lab)
+  groups = clusters(train_data, train, dims)
+  # mu(disty) per cluster, only from labelled rows
+  lab_ids = set(id(r) for r in lab.rows)
+  mu_of, worst = {}, 0
+  for k, rs in groups.items():
+    here = [r for r in rs if id(r) in lab_ids]
+    if here:
+      mu_of[k] = adds(disty(lab, r) for r in here).mu
+      worst = max(worst, mu_of[k])
+  # classify test rows
+  def predict(row):
+    k = tuple(index(dim, train_data, row) for dim in dims)
+    return mu_of.get(k, worst)
+  guess = sorted(test, key=predict)
+  pick  = min(guess[:the.check], key=lambda r: disty(data, r))
+  best_train = min(lab.rows, key=lambda r: disty(data, r))
+  return best_train, pick
 
 ### 4. Utilities ---------------------------------------
 def o(x):
@@ -339,6 +377,18 @@ def test__best():
   for rs in good:
     s = adds(disty(data,r) for r in rs)
     print(f"  n={len(rs)}, mu={s.mu:.3f}, sd={s.sd:.3f}")
+
+def test__acquire():
+  "Cluster-classify: train wins vs test wins over 20 repeats."
+  data = Data(csv(the.file))
+  W = wins(data)
+  train_w, test_w = Num(), Num()
+  for _ in range(20):
+    best_train, pick = acquire(data)
+    add(train_w, W(best_train))
+    add(test_w,  W(pick))
+  print(f":train_wins_mu {int(train_w.mu)} :train_wins_sd {int(train_w.sd)} "
+        f":test_wins_mu {int(test_w.mu)} :test_wins_sd {int(test_w.sd)}")
 
 def test__all():
   "Run every test__ function; reseed each."

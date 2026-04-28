@@ -1,5 +1,24 @@
 # TODO
 
+## rash vs ezr acquire (2026-04-28)
+
+budget=50, check=3, 20 repeats
+
+| Dataset | | train_wins | test_wins |
+|---------|------|-----------|----------|
+| **auto93** (398) | ezr | 96 ± 3 | **78 ± 21** |
+| | rash | 91 ± 6 | 58 ± 21 |
+| **pom3a** (20k) | ezr | 90 ± 5 | **56 ± 30** |
+| | rash | 81 ± 11 | 51 ± 26 |
+| **Health-Commits** (10k) | ezr | 98 ± 1 | **96 ± 1** |
+| | rash | 97 ± 0 | 89 ± 23 |
+
+- ezr wins on test, especially auto93 (+20) and Health-Commits (+7). Train gap smaller. rash competitive on pom3a.
+- ezr: active learning (iteratively picks best next row) + decision tree prediction.
+- rash: passive random labelling + cluster-mu lookup.
+- Active learning concentrates labels in promising regions. Tree generalizes better than cluster-key lookup (handles unseen keys).
+- Biggest gap = auto93 (small data). Cluster-key misses hurt when few test rows land in labelled clusters.
+
 ## Outstanding from 2026-04-25 session
 
 - [ ] **poles() — pole-picking math unclear**. Need to derive on paper.
