@@ -19,6 +19,46 @@ budget=50, check=3, 20 repeats
 - Active learning concentrates labels in promising regions. Tree generalizes better than cluster-key lookup (handles unseen keys).
 - Biggest gap = auto93 (small data). Cluster-key misses hurt when few test rows land in labelled clusters.
 
+## Outstanding from 2026-05-03 session
+
+- [ ] **Pick "big cluster" threshold for validate**.
+
+  `validate1` reports `big_clusters` = count of groups with
+  `len(rs) > 2*n_dims`. On auto93/budget=50/n_dims=8 → threshold=16,
+  always 0.
+
+  Distribution observed (auto93, seed=1, budget=50):
+  - 26 clusters total
+  - sizes: `[7, 6, 5, 5, 4, 2, 2, 1*19]` (19 singletons)
+  - bins/dim: `[3,3,3,3,3,3,3,3]`
+
+  Threshold options:
+
+  | Rule              | Value | Big count | Meaning                         |
+  |-------------------|-------|-----------|---------------------------------|
+  | `>= 2`            | 2     | 7         | non-singletons (matches test__dim `alln`) |
+  | `>= n_dims`       | 8     | 0         | one row per dim                 |
+  | `>= sqrt(budget)` | ~7    | 1         | rule of thumb                   |
+  | `> 2*n_dims`      | 16    | 0         | current — too strict            |
+
+  Action: probably `>= 2` (matches existing test__dim semantics). Update
+  `validate1` to use chosen rule. Maybe also report `n_clusters` so
+  big/total ratio visible.
+
+## Done 2026-05-03 session
+
+- `TwoD(data)` bundle with cached `X` (distx) and `Y` (disty); `memo` helper.
+- `newDim` rewritten: north = max-min perpendicular distance to current +
+  prior axes; south = farthest from north. Threads `priors` from `newDims`.
+- Deleted `cosine`; replaced by `proj` + `perpY` (perpY built on proj,
+  no duplicated cosine math).
+- `validate1` (one trial) + `validate` (N trials, builds `wins` once).
+- Ported `wins(data)` from ezr — eval-only Y access, 0..100 win-score.
+- Y access strictly limited to (1) budget rows in lab, (2) top-check rows.
+- One-line key/val output:
+  `win_lab 100.0 win_check 86.5 dims 7.0 bins 3.7 big_clusters 0.0 budget 50 check 5 repeats 20 file auto93.csv`
+- Added `--check=5`, `--repeats=20` options.
+
 ## Outstanding from 2026-04-25 session
 
 - [ ] **poles() — pole-picking math unclear**. Need to derive on paper.
@@ -54,6 +94,10 @@ budget=50, check=3, 20 repeats
 
   Action: sketch math on paper, decide scoring fn, then pick algorithm
   (linear scan + cached proj likely winner once scoring locked).
+
+  NOTE 2026-05-03: partially addressed. perpY now scores per-point min
+  perp dist across current+prior axes. Linear-scan + cached t.X used.
+  Still want to confirm math choice (min vs prod vs avg) on paper.
 
 ## Outstanding from 2026-04-23 session
 

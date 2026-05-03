@@ -20,11 +20,12 @@ Options:
     --p=2             Minkowski p
     --eps=0.35        margin multiplier
     --budget=50       label budget
+    --check=5         test rows to label after ranking
+    --repeats=20      validate trials
     --bins=10         bins per dim
     --few=32          pole sample size
     --dims=10         max dims
     --elite=0.5       quantile cut for best
-    --check=3         holdout labels
     --file=auto93.csv input csv
 """
 import re, sys, random
@@ -75,6 +76,15 @@ class Dim:
     i.north = i.south = None
 
 ### 1. Basics ---------------------------------------
+def memo(fn, key):
+  "Memoize fn by key(*args)."
+  m = {}
+  def g(*a):
+    k = key(*a)
+    if k not in m: m[k] = fn(*a)
+    return m[k]
+  return g
+
 def sub(i, v): return add(i, v, -1)
 
 def adds(vs, i=None):
@@ -148,51 +158,73 @@ def disty(data, row):
   return minkowski(abs(norm(col, row[col.at]) - col.heaven)
                    for col in data.roles.ys)
 
-def proj(dim, data, row):
-  "Project row onto east-west via fastmap (uses gap)."
-  de = distx(data, row, dim.east)
-  dw = distx(data, row, dim.west)
-  return (de*de + dim.gap*dim.gap - dw*dw) / (2*dim.gap+1e-32)
+def wins(data):
+  "Return f(row)->0..100 win%. 100=lo, 0=median. Eval-only: peeks all Y."
+  ys = sorted(disty(data, r) for r in data.rows)
+  ten = max(1, len(ys) // 10)
+  lo, med = ys[0], ys[len(ys)//2]
+  sd = (ys[min(len(ys)-1, 9*ten)] - ys[ten]) / 2.56
+  def f(row):
+    x = disty(data, row)
+    if x < lo + 0.35*sd: x = lo
+    return max(-100, int(100 * (1 - (x - lo) / (med - lo + 1e-32))))
+  return f
 
-def cosine(data, dim, row):
-  "S(row, x=along axis, y=perp dist, theta=y/|x|)."
-  a = distx(data, row, dim.east)
-  b = distx(data, row, dim.west)
-  c = dim.gap
-  x = (a*a + c*c - b*b) / (2*c)
-  y = max(0, a*a - x*x) ** .5
-  return S(row=row, x=x, y=y, theta=y/abs(x+1e-32))
+def TwoD(data):
+  "Bundle data with cached distx (X) and disty (Y)."
+  pkey = lambda a,b: (id(a),id(b)) if id(a)<id(b) else (id(b),id(a))
+  return S(data=data,
+           X=memo(lambda a,b: distx(data,a,b), pkey),
+           Y=memo(lambda r: disty(data,r), id))
+
+def proj(t, dim, row):
+  "Fastmap projection x-coord (along east-west axis)."
+  a, b, c = t.X(row, dim.east), t.X(row, dim.west), dim.gap
+  return (a*a + c*c - b*b) / (2*c + 1e-32)
+
+def perpY(t, dim, row):
+  "Perp distance from axis. y^2 = a^2 - x^2."
+  x = proj(t, dim, row)
+  a = t.X(row, dim.east)  # cached, free
+  return max(0, a*a - x*x) ** .5
 
 ### 3. Fastmap ---------------------------------------
-def index(dim, data, row):
+def index(t, dim, row):
   "Bin index of row on this axis."
-  p = proj(dim, data, row)
+  p = proj(t, dim, row)
   for k, cut in enumerate(dim.cuts):
     if p <= cut: return k
   return len(dim.cuts)
 
-def newDim(data, rows, epsx, east=None, west=None):
-  "Build Dim or None if gap < epsx."
-  D    = lambda r1,r2: distx(data, r1, r2)
+def newDim(t, rows, epsx, east=None, west=None, priors=()):
+  "Build Dim or None if gap < epsx. priors = list of prior Dim."
+  D = t.X
+  # 1. sample ~32 rows from rows.
+  lst = sample(rows, min(the.few, len(rows)))
   if not (east and west):
-    lst  = sample(rows, min(the.few, len(rows)))
+    # 2. east = row farthest from lst[0] (random anchor). standard fastmap pole.
     east = east or max(lst, key=lambda r: D(r, lst[0]))
+    # 3. west = row farthest from east. east<->west = main axis.
     west = max(lst, key=lambda r: D(r, east))
-  if (gap := D(east, west)) > epsx:
-    dim = Dim(east, west, gap)
-    lst = sample(rows, min(the.few, len(rows)))
-    ps  = [cosine(data, dim, row) for row in lst]
-    n   = max(ps, key=lambda p: p.y)
-    s   = min(ps, key=lambda p: (p.x - n.x)**2 + p.y**2)
-    dim.north, dim.south = n.row, s.row
-    return dim
+  # 4. gap = D(east, west). if too small, bail (axis useless).
+  if (gap := D(east, west)) <= epsx: return
+  dim = Dim(east, west, gap)
+  # 5. north = row farthest (perpendicular) from current axis AND every prior axis.
+  #    cosine().y = perp dist. max-min over axes => orthogonal direction for next dim.
+  axes = [dim] + list(priors)
+  dim.north = max(lst, key=lambda r: min(perpY(t, ax, r) for ax in axes))
+  # 6. south = row farthest from north. opposite end of that new direction.
+  dim.south = max(lst, key=lambda r: D(r, dim.north))
+  # 7. north/south become hint poles for next call to newDim
+  #    (passed in as east/west of dim k+1).
+  return dim
 
 # do not delete. lessons learned. of ten first few
 # dimensions get no cs since n+1 dims test for orthongality .
 # so earleuer dimensions can be irrelvancies.
-def sweepCuts(dim, data, rows, least=2):
+def sweepCuts(t, dim, rows, least=2):
   "Y-supervised sweep: cut where disty variance reduces."
-  pairs = sorted((proj(dim, data, r), disty(data, r)) for r in rows)
+  pairs = sorted((proj(t, dim, r), t.Y(r)) for r in rows)
   whole = adds(y for _,y in pairs)
   if whole.sd < 1e-9 or whole.n < 2*least: return []
   right = adds(y for _,y in pairs)
@@ -207,81 +239,76 @@ def sweepCuts(dim, data, rows, least=2):
       last = k
   return cuts
 
-def pruneDims(dims, data, rows, least=2):
-  "Y-supervised sweep prune on each dim."
-  for dim in dims:
-    cuts = sweepCuts(dim, data, rows, least=least)
-    if cuts: dim.cuts = cuts
-  return dims
-
-def newDims(data, rows, lab=None):
-  "Grow dims on sample, then prune cuts via lab or data."
+def newDims(t, rows):
+  "Grow dims on sample, Y-supervised sweep prune."
   lst = sample(rows, min(the.few, len(rows)))
-  x   = adds(distx(data, *sample(lst,2)) for _ in range(the.few))
+  x   = adds(t.X(*sample(lst,2)) for _ in range(the.few))
   out, east, west, now = [], None, None, {}
   while len(out) < the.dims:
     epsx = 0 if not out else the.eps*x.sd
-    dim = newDim(data, rows, epsx, east, west)
+    dim = newDim(t, rows, epsx, east, west, priors=out)
     if not dim: break
-    nxt = clusters(data, rows, out + [dim])
+    nxt = clusters(t, rows, out + [dim])
     if out and len(nxt) <= len(now): break
     out.append(dim)
     now, east, west = nxt, dim.north, dim.south
-  return pruneDims(out, lab or data, lab.rows if lab else rows, 2*len(out))
+  for dim in out:
+    cuts = sweepCuts(t, dim, rows, least=2*len(out))
+    if cuts: dim.cuts = cuts
+  return out
 
-def clusters(data, rows, dims):
+def clusters(t, rows, dims):
   "Group rows by joint Dim-index tuple."
   out = {}
   for row in rows:
-    k = tuple(index(dim, data, row) for dim in dims)
+    k = tuple(index(t, dim, row) for dim in dims)
     out.setdefault(k, []).append(row)
   return out
 
-def best(data, groups):
+def best(t, groups):
   "Clusters with mu(disty) below the.elite quantile of all rows. Best first."
   if not groups:
-    rows = sorted(data.rows, key=lambda r: disty(data,r))
+    rows = sorted(t.data.rows, key=t.Y)
     n = max(1, len(rows) // int(the.bins))
     groups = {(k,): rows[k*n:(k+1)*n] for k in range(int(the.bins))}
-  ys     = sorted(disty(data,r) for r in data.rows)
+  ys     = sorted(t.Y(r) for r in t.data.rows)
   thresh = ys[int(len(ys) * the.elite)]
-  scored = sorted((adds(disty(data,r) for r in rs).mu, rs)
+  scored = sorted((adds(t.Y(r) for r in rs).mu, rs)
                   for rs in groups.values())
   out    = [rs for mu,rs in scored if mu < thresh]
   return out or [scored[0][1]]
 
-def wins(data):
-  "Scorer: 100=best, 0=median, relative to all rows."
-  ds = sorted(disty(data, r) for r in data.rows)
-  lo, med = ds[0], ds[len(ds)//2]
-  return lambda r: int(100*(1 - (disty(data,r)-lo) / (med-lo+1e-32)))
-
-def acquire(data):
-  "Cluster-classify pipeline: train on B, predict on holdout, label top C."
+def validate1(data, win):
+  "One trial. Returns (best_lab, best_check, n_dims, mean_cuts)."
   rows = data.rows[:]; shuffle(rows)
-  mid  = len(rows) // 2
-  train, test = rows[:mid], rows[mid:]
-  train_data = clone(data, train)
-  lab  = labelled(train_data)
-  # dims from all train (x-structure), sweepCuts from lab (y-supervised)
-  dims = newDims(train_data, train, lab)
-  groups = clusters(train_data, train, dims)
-  # mu(disty) per cluster, only from labelled rows
-  lab_ids = set(id(r) for r in lab.rows)
-  mu_of, worst = {}, 0
-  for k, rs in groups.items():
-    here = [r for r in rs if id(r) in lab_ids]
-    if here:
-      mu_of[k] = adds(disty(lab, r) for r in here).mu
-      worst = max(worst, mu_of[k])
-  # classify test rows
-  def predict(row):
-    k = tuple(index(dim, train_data, row) for dim in dims)
-    return mu_of.get(k, worst)
-  guess = sorted(test, key=predict)
-  pick  = min(guess[:the.check], key=lambda r: disty(data, r))
-  best_train = min(lab.rows, key=lambda r: disty(data, r))
-  return best_train, pick
+  half = len(rows) // 2
+  train_rows, test = rows[:half], rows[half:]
+  lab_rows   = sample(train_rows, min(the.budget, len(train_rows)))
+  lab        = clone(data, lab_rows)         # Y access #1: budget rows
+  tl         = TwoD(lab)
+  dims       = newDims(tl, lab.rows)
+  groups     = clusters(tl, lab.rows, dims)
+  def predict(r):                              # X-only on test
+    k = tuple(index(tl, dim, r) for dim in dims)
+    pool = groups.get(k) or lab.rows
+    nn = min(pool, key=lambda tr: tl.X(r, tr))
+    return tl.Y(nn)
+  picked = sorted(test, key=predict)[:int(the.check)]   # Y access #2: check rows
+  n_dims    = len(dims)
+  mean_bins = sum(len(d.cuts)+1 for d in dims) / n_dims if dims else 0
+  big       = sum(1 for rs in groups.values() if len(rs) > 2*n_dims)
+  return (max(win(r) for r in lab.rows),
+          max(win(r) for r in picked),
+          n_dims, mean_bins, big)
+
+def validate(data):
+  "Run validate1 the.repeats times. Returns Nums for lab, check, dims, bins, big-clusters."
+  win = wins(data)
+  ln, cn, dn, bn, gn = Num(), Num(), Num(), Num(), Num()
+  for _ in range(int(the.repeats)):
+    bl, bc, nd, mb, big = validate1(data, win)
+    add(ln, bl); add(cn, bc); add(dn, nd); add(bn, mb); add(gn, big)
+  return ln, cn, dn, bn, gn
 
 ### 4. Utilities ---------------------------------------
 def o(x):
@@ -327,9 +354,10 @@ def test__dim():
   "Build dims on sample vs all, cluster all data."
   data = Data(csv(the.file))
   lab  = labelled(data)
-  dims = newDims(lab, lab.rows)
-  groups = clusters(lab, data.rows, dims)
-  good = best(data, groups)
+  tl, td = TwoD(lab), TwoD(data)
+  dims = newDims(tl, lab.rows)
+  groups = clusters(tl, data.rows, dims)
+  good = best(td, groups)
   alln = sum(1 for rs in groups.values() if len(rs) >= 2)
   print(f"rows={len(data.rows)}, budget={len(lab.rows)}, ",end=" ")
   print(f"best={len(good)}, all={alln}, "
@@ -345,8 +373,9 @@ def test__4d():
     print("skip: gen etc/spread4of7.csv first"); return
   data = Data(csv(path))
   lab  = labelled(data)
-  dims = newDims(lab, lab.rows)
-  groups = clusters(lab, lab.rows, dims)
+  t    = TwoD(lab)
+  dims = newDims(t, lab.rows)
+  groups = clusters(t, lab.rows, dims)
   print("4d test: dims", len(dims), "clusters", len(groups),
         "bins", [len(dim.cuts)+1 for dim in dims])
   assert len(dims) <= 5, f"want ~4 dims, got {len(dims)}"
@@ -359,8 +388,9 @@ def test__simplex():
     print("skip: make etc/simplex5.csv first"); return
   data = Data(csv(path))
   lab  = labelled(data)
-  dims = newDims(lab, lab.rows)
-  groups = clusters(lab, lab.rows, dims)
+  t    = TwoD(lab)
+  dims = newDims(t, lab.rows)
+  groups = clusters(t, lab.rows, dims)
   print("simplex dims", len(dims), "clusters", len(groups),
         "bins", [len(dim.cuts)+1 for dim in dims])
 
@@ -368,27 +398,25 @@ def test__best():
   "Count all clusters vs best (>half rows in top-sqrt(N) elite)."
   data = Data(csv(the.file))
   lab  = labelled(data)
-  dims = newDims(lab, lab.rows)
-  groups = clusters(lab, data.rows, dims)
-  good = best(data, groups)
-  whole = adds(disty(data,r) for r in data.rows)
+  tl, td = TwoD(lab), TwoD(data)
+  dims = newDims(tl, lab.rows)
+  groups = clusters(tl, data.rows, dims)
+  good = best(td, groups)
+  whole = adds(td.Y(r) for r in data.rows)
   print(f"all={len(groups)}, best={len(good)}, "
         f"whole.mu={whole.mu:.3f}")
   for rs in good:
-    s = adds(disty(data,r) for r in rs)
+    s = adds(td.Y(r) for r in rs)
     print(f"  n={len(rs)}, mu={s.mu:.3f}, sd={s.sd:.3f}")
 
-def test__acquire():
-  "Cluster-classify: train wins vs test wins over 20 repeats."
+def test__validate():
+  "Repeated validate. One-line key val output."
   data = Data(csv(the.file))
-  W = wins(data)
-  train_w, test_w = Num(), Num()
-  for _ in range(20):
-    best_train, pick = acquire(data)
-    add(train_w, W(best_train))
-    add(test_w,  W(pick))
-  print(f":train_wins_mu {int(train_w.mu)} :train_wins_sd {int(train_w.sd)} "
-        f":test_wins_mu {int(test_w.mu)} :test_wins_sd {int(test_w.sd)}")
+  ln, cn, dn, bn, gn = validate(data)
+  print(f"win_lab {ln.mu:.1f} win_check {cn.mu:.1f} "
+        f"dims {dn.mu:.1f} bins {bn.mu:.1f} big_clusters {gn.mu:.1f} "
+        f"budget {the.budget} check {the.check} repeats {the.repeats} "
+        f"file {re.sub('.*/','',the.file)}")
 
 def test__all():
   "Run every test__ function; reseed each."
