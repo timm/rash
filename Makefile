@@ -33,17 +33,25 @@ push: ## commit with prompted msg and push
 	 git commit -am "$$msg"; git push; git status
 
 # Test runner targets
-CSVS = ls $(HOME)/gits/moot/optimize/*/*.csv | sort -R | xargs -P 6 -I{} sh -c
+CSVS = ls $(HOME)/gits/moot/optimize/*/*.csv | sort -R | xargs -P 20 -I{} sh -c
 
 ok: ~/gits/moot
 
 ~/gits/moot:
-	git  clone https://github.com/timm/moot ~/gits/moot
+	@[ -d $@ ] || git clone https://github.com/timm/moot $@
 
 ~/tmp/rash_dim.log:  ok ## run ez_acq tests
 	@mkdir -p ~/tmp
 	@$(CSVS) 'python3 -B rash.py --elite=0.25 --file={} --dim ' | tee $@
 	gawk 'BEGIN{FS="=|,"} {print $$6}' $@ | sort -n | fmt -85
+
+B?=50
+C?=5
+
+~/tmp/rash_validate.log: ok ## run --validate on all moot CSVs
+	@mkdir -p ~/tmp
+	@$(CSVS) 'python3 -B rash.py --file={} --budget=$B --check=$C --validate' | tee $@
+	gawk '{print $$4}' $@ | sort -n | fmt -85
 
 etc/simplex5.csv: etc/simplex5_noisy.py
 	@python3 $< > $@
