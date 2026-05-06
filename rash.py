@@ -32,6 +32,7 @@ import re, sys, random
 from random import sample, shuffle
 from math import exp,sqrt
 from types import SimpleNamespace as S
+from collections import defaultdict
 
 isa = isinstance
 
@@ -265,6 +266,113 @@ def clusters(t, rows, dims):
     out.setdefault(k, []).append(row)
   return out
 
+### 3b. Tree (binary recursive split) ---------------------------------------
+class Node:
+  "Binary tree node. n=#rows, gs={ycol.txt: mu}, split=(dim,cut,gain) or None."
+  def __init__(i, t, rows):
+    i.n, i.rows = len(rows), rows
+    i.gs = {col.txt: adds(row[col.at] for row in rows
+                          if row[col.at] != "?").mu
+            for col in t.data.roles.ys}
+    i.split = i.lo = i.hi = None
+
+def bestSplit(t, rows, dims, min_n):
+  "Pick (dim,cut) on rows that most reduces sd of disty."
+  pick = None
+  for dim in dims:
+    pairs = sorted((proj(t,dim,r), t.Y(r), r) for r in rows)
+    if len(pairs) < 2*min_n: continue
+    whole = adds(y for _,y,_ in pairs)
+    if whole.sd < 1e-9: continue
+    right = adds(y for _,y,_ in pairs)
+    left  = Num()
+    for k,(x,y,_) in enumerate(pairs[:-1]):
+      add(left, sub(right, y))
+      if left.n < min_n or right.n < min_n: continue
+      if x == pairs[k+1][0]: continue
+      score = (left.n*left.sd + right.n*right.sd) / whole.n
+      gain  = whole.sd - score
+      if gain > 0 and (pick is None or gain > pick[0]):
+        cut = (x + pairs[k+1][0]) / 2
+        pick = (gain, dim, cut, k, pairs)
+  if not pick: return None
+  gain, dim, cut, k, pairs = pick
+  return (gain, dim, cut,
+          [r for _,_,r in pairs[:k+1]],
+          [r for _,_,r in pairs[k+1:]])
+
+def growTree(t, rows, dims, depth=0, max_depth=8, min_n=4):
+  "Recursive binary split on best variance-reducing cut."
+  node = Node(t, rows)
+  if depth >= max_depth or len(rows) < 2*min_n: return node
+  pick = bestSplit(t, rows, dims, min_n)
+  if not pick: return node
+  gain, dim, cut, lo, hi = pick
+  node.split = (dim, cut, gain)
+  node.lo = growTree(t, lo, dims, depth+1, max_depth, min_n)
+  node.hi = growTree(t, hi, dims, depth+1, max_depth, min_n)
+  return node
+
+def predictTree(t, node, row):
+  "Walk to leaf."
+  while node.split:
+    dim, cut, _ = node.split
+    node = node.lo if proj(t, dim, row) <= cut else node.hi
+  return node
+
+def score(t, root, rows, sensitive, ycol_txt, pos=1, thresh=0.5):
+  "Count tp/fp/tn/fn per group + 'all'. Returns nested defaultdict[int]."
+  ycol = next(c for c in t.data.roles.all if c.txt == ycol_txt)
+  scol = next(c for c in t.data.roles.all if c.txt == sensitive)
+  stats = defaultdict(lambda: defaultdict(int))
+  for r in rows:
+    pred = pos if predictTree(t, root, r).gs[ycol_txt] >= thresh else (1 - pos)
+    true = r[ycol.at]
+    g    = r[scol.at]
+    cell = ("tp" if true==pos and pred==pos else
+            "fp" if true!=pos and pred==pos else
+            "tn" if true!=pos and pred!=pos else "fn")
+    stats[g][cell]   += 1
+    stats["all"][cell] += 1
+  return stats
+
+def metrics(d):
+  "Derive acc/tpr/fpr/ppv/n from a tp/fp/tn/fn cell."
+  tp,fp,tn,fn = d["tp"],d["fp"],d["tn"],d["fn"]
+  n = tp+fp+tn+fn
+  return dict(n=n,
+              acc=(tp+tn)/n if n else 0,
+              tpr=tp/(tp+fn) if tp+fn else 0,
+              fpr=fp/(fp+tn) if fp+tn else 0,
+              ppv=tp/(tp+fp) if tp+fp else 0)
+
+def showScore(stats):
+  "Derive + print acc, FPR, predictive equality, equal opportunity, per group."
+  groups  = {g: metrics(d) for g,d in stats.items() if g != "all"}
+  overall = metrics(stats["all"])
+  fprs    = [v["fpr"] for v in groups.values() if v["n"]]
+  tprs    = [v["tpr"] for v in groups.values() if v["n"]]
+  pe      = (min(fprs)/max(fprs)) if fprs and max(fprs)>0 else 1.0
+  eo      = (min(tprs)/max(tprs)) if tprs and max(tprs)>0 else 1.0
+  print(f"acc={overall['acc']:.3f}  tpr={overall['tpr']:.3f}  "
+        f"fpr={overall['fpr']:.3f}  "
+        f"predictive_equality={pe:.3f}  equal_opportunity={eo:.3f}")
+  for g,m in groups.items():
+    print(f"  {g:25s} n={m['n']:5d}  acc={m['acc']:.3f}  "
+          f"tpr={m['tpr']:.3f}  fpr={m['fpr']:.3f}  ppv={m['ppv']:.3f}")
+
+def showTree(node, indent=0):
+  "Pretty-print tree."
+  pad = "|  "*indent
+  gs  = " ".join(f"{k}={v:.2f}" for k,v in node.gs.items())
+  if node.split:
+    _, cut, gain = node.split
+    print(f"{pad}n={node.n}  {gs}  [cut={cut:.2f} gain={gain:.3f}]")
+    showTree(node.lo, indent+1)
+    showTree(node.hi, indent+1)
+  else:
+    print(f"{pad}n={node.n}  {gs}  *leaf*")
+
 def best(t, groups):
   "Clusters with mu(disty) below the.elite quantile of all rows. Best first."
   if not groups:
@@ -408,6 +516,26 @@ def test__best():
   for rs in good:
     s = adds(td.Y(r) for r in rs)
     print(f"  n={len(rs)}, mu={s.mu:.3f}, sd={s.sd:.3f}")
+
+def test__tree():
+  "Build dims, grow binary tree, print."
+  data = Data(csv(the.file))
+  lab  = labelled(data)
+  tl   = TwoD(lab)
+  dims = newDims(tl, lab.rows)
+  tree = growTree(tl, data.rows, dims)
+  showTree(tree)
+
+def test__fair():
+  "Tree on COMPAS-style data. Reports accuracy + predictive equality."
+  data = Data(csv(the.file))
+  lab  = labelled(data)
+  tl   = TwoD(lab)
+  dims = newDims(tl, lab.rows)
+  tree = growTree(tl, data.rows, dims)
+  ycol = next(c for c in data.roles.all if c.txt[-1] in "+-!")
+  scol = getattr(the, "sensitive", "raceX")
+  showScore(score(tl, tree, data.rows, scol, ycol.txt))
 
 def test__validate():
   "Repeated validate. One-line key val output."
